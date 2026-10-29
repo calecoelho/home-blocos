@@ -54,11 +54,14 @@ def limpar_tabela(df: pd.DataFrame) -> pd.DataFrame:
     for c in calc.COLUNAS:
         if c not in d.columns:
             d[c] = "" if c == "bloco" else 0
-    d = d[calc.COLUNAS]
+    tem_posicao = "posicao" in d.columns
+    d = d[calc.COLUNAS + (["posicao"] if tem_posicao else [])]
     d["bloco"] = d["bloco"].fillna("").astype(str).str.strip()
     d = d[d["bloco"] != ""].copy()
     for c in ["elegiveis", "visiveis", "ctr"]:
         d[c] = d[c].map(para_numero)
+    if tem_posicao:   # posição em branco continua em branco (o cálculo põe esses blocos no fim)
+        d["posicao"] = pd.to_numeric(d["posicao"], errors="coerce")
     vistos, nomes = {}, []
     for n in d["bloco"]:
         vistos[n] = vistos.get(n, 0) + 1
@@ -98,6 +101,17 @@ def _erro_totais(dados: dict) -> float:
     return max(erros) if erros else 0.0
 
 
+def com_posicao(df: pd.DataFrame) -> pd.DataFrame:
+    """Garante a coluna `posicao` (primeira da tabela). Se faltar, assume a ordem do mais visto para o menos visto."""
+    d = df.copy()
+    if "posicao" not in d.columns:
+        d.insert(0, "posicao", pd.to_numeric(d["visiveis"], errors="coerce").rank(ascending=False, method="first"))
+    else:
+        d = d[["posicao"] + [c for c in d.columns if c != "posicao"]]
+    d["posicao"] = pd.to_numeric(d["posicao"], errors="coerce")
+    return d.sort_values("posicao", kind="stable").reset_index(drop=True)
+
+
 def extrair(imagens, api_key: str, modelo: str | None = None):
     """imagens: lista de (bytes, tipo_mime). Devolve (tabela, total_visiveis_do_print).
 
@@ -130,4 +144,4 @@ def extrair(imagens, api_key: str, modelo: str | None = None):
         if c in juntas.columns:
             juntas[c] = juntas[c].map(para_numero)
     juntas = juntas.drop_duplicates(subset=[c for c in calc.COLUNAS if c in juntas.columns])
-    return limpar_tabela(juntas), total_visiveis
+    return com_posicao(limpar_tabela(juntas)), total_visiveis

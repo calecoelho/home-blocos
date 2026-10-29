@@ -1,84 +1,77 @@
-"""Lógica de cálculo do simulador de posições da home.
+"""Cálculo do simulador de posições da home.
 
-Ideia central (simples):
-- Cada POSIÇÃO da home tem uma taxa de visibilidade: visíveis / base da home.
-  A base da home é o número de acessos à home (o "elegível" típico, ~101 mil), e não o
-  elegível do bloco, porque alguns blocos só aparecem para uma parte do público.
-- Cada BLOCO tem a sua taxa de clique (open rate), que é do conteúdo e acompanha o bloco.
-- Quando um bloco muda de posição, ele passa a ter a visibilidade da posição nova,
-  mas mantém o próprio CTR.   cliques = elegíveis do bloco x visibilidade da posição x CTR
+A ideia é simples:
+- Cada POSIÇÃO da home é vista por um número de pessoas: o "Module Viewable" que o print mostra
+  para o bloco que está lá hoje.
+- Cada BLOCO tem o seu open rate (CTR), que é do conteúdo e acompanha o bloco quando ele muda de lugar.
+- Quando um bloco muda de posição, ele passa a ser visto pelo número de pessoas da posição nova,
+  mas nunca por mais gente do que o público elegível dele.
+      cliques = visíveis da posição  x  CTR do bloco
 """
+import numpy as np
 import pandas as pd
+from scipy.optimize import linear_sum_assignment
 
 COLUNAS = ["bloco", "elegiveis", "visiveis", "ctr"]
 
-
-def base_da_home(d: pd.DataFrame) -> float:
-    """Acessos à home: o valor de elegíveis mais comum entre os blocos (mediana)."""
-    return float(d["elegiveis"].median())
+# Na busca pela melhor ordem, um bloco só sai do lugar se isso render pelo menos este tanto de cliques.
+# Evita sugerir mexidas que não valem a pena (e desempata a favor de não mexer).
+GANHO_MINIMO = 1.0
 
 
 def preparar(df: pd.DataFrame) -> pd.DataFrame:
-    """Ordena por posição (se existir) ou por visíveis (como no print) e numera as posições."""
+    """Põe os blocos na ordem das posições e numera de 1 em diante.
+
+    Se a tabela tiver a coluna `posicao`, ela manda; blocos sem posição vão para o fim,
+    do mais visto para o menos visto. Sem a coluna, a ordem é do mais visto para o menos visto.
+    """
     d = df.copy()
     for c in ["elegiveis", "visiveis", "ctr"]:
         d[c] = pd.to_numeric(d[c], errors="coerce").fillna(0)
-    if "posicao" in d.columns and d["posicao"].notna().all():
-        d = d.sort_values("posicao")
+    if "posicao" in d.columns:
+        pos = pd.to_numeric(d["posicao"], errors="coerce")
+        d["_pos"] = pos.fillna((pos.max() if pos.notna().any() else 0) + 1)
+        d = d.sort_values(["_pos", "visiveis"], ascending=[True, False], kind="stable").drop(columns="_pos")
     else:
-        d = d.sort_values("visiveis", ascending=False)
+        d = d.sort_values("visiveis", ascending=False, kind="stable")
     d = d.reset_index(drop=True)
     d["posicao"] = d.index + 1
     return d
 
 
-def cliques(d: pd.DataFrame) -> pd.Series:
-    return d["visiveis"] * d["ctr"] / 100
+def _teto(d: pd.DataFrame) -> np.ndarray:
+    """Máximo de pessoas que podem ver cada bloco (o público elegível dele)."""
+    return np.maximum(d["elegiveis"].to_numpy(float), d["visiveis"].to_numpy(float))
 
 
-def simular(df, bloco, nova_posicao, modo="descer", ajuste_ctr_pct=0.0, base_home=None):
-    """Move `bloco` para `nova_posicao` (1 = topo).
+def avaliar(d: pd.DataFrame, nova_ordem: list) -> pd.DataFrame:
+    """Calcula os cliques de cada bloco se a home ficasse na `nova_ordem` (lista de nomes, topo primeiro).
 
-    modo="descer": quem estava no caminho desce uma posição (os demais ficam como estão).
-    modo="trocar": o bloco que estava na posição de destino vai para a posição de origem.
-    ajuste_ctr_pct: correção opcional no CTR do bloco movido (ex.: +10 ou -15).
+    `d` precisa ter passado por `preparar`.
     """
-    d = preparar(df)
     nomes = list(d["bloco"])
-    if bloco not in nomes:
-        raise ValueError(f"Bloco '{bloco}' não encontrado.")
-    i = nomes.index(bloco)
-    j = int(nova_posicao) - 1
+    if sorted(nova_ordem) != sorted(nomes):
+        raise ValueError("A nova ordem precisa ter exatamente os mesmos blocos da tabela.")
+    pos_atual = {n: i for i, n in enumerate(nomes)}
+    vis_posicao = d["visiveis"].to_numpy(float)
+    teto = _teto(d)
 
-    nova_ordem = nomes.copy()
-    if modo == "trocar":
-        nova_ordem[i], nova_ordem[j] = nova_ordem[j], nova_ordem[i]
-    else:
-        nova_ordem.pop(i)
-        nova_ordem.insert(j, bloco)
-
-    # taxa de visibilidade de cada posição (da foto original), sobre a base da home
-    base_home = base_home or base_da_home(d) or 1.0
-    taxa_pos = (d["visiveis"] / base_home).clip(upper=1.0).tolist()
-
-    base = d.set_index("bloco")
     linhas = []
-    for pos_nova, nome in enumerate(nova_ordem):
-        r = base.loc[nome]
-        vis_novo = r["elegiveis"] * taxa_pos[pos_nova]
-        ctr_novo = r["ctr"] * (1 + ajuste_ctr_pct / 100) if nome == bloco else r["ctr"]
+    for p, nome in enumerate(nova_ordem):
+        i = pos_atual[nome]
+        vis_novo = min(vis_posicao[p], teto[i])
+        ctr = float(d.at[i, "ctr"])
         linhas.append({
             "bloco": nome,
-            "pos_antes": int(r["posicao"]),
-            "pos_depois": pos_nova + 1,
-            "visiveis_antes": r["visiveis"],
-            "visiveis_depois": round(vis_novo),
-            "ctr": r["ctr"],
-            "ctr_depois": ctr_novo,
-            "cliques_antes": r["visiveis"] * r["ctr"] / 100,
-            "cliques_depois": vis_novo * ctr_novo / 100,
+            "pos_antes": i + 1,
+            "pos_depois": p + 1,
+            "visiveis_antes": float(d.at[i, "visiveis"]),
+            "visiveis_depois": float(vis_novo),
+            "ctr": ctr,
+            "cliques_antes": float(d.at[i, "visiveis"]) * ctr / 100,
+            "cliques_depois": float(vis_novo) * ctr / 100,
         })
-    out = pd.DataFrame(linhas).sort_values("pos_antes").reset_index(drop=True)
+    out = pd.DataFrame(linhas).sort_values("pos_depois").reset_index(drop=True)
     out["variacao"] = out["cliques_depois"] - out["cliques_antes"]
     return out
 
@@ -90,20 +83,33 @@ def resumo(out: pd.DataFrame) -> dict:
         "depois": depois,
         "saldo": depois - antes,
         "saldo_pct": (depois - antes) / antes * 100 if antes else 0.0,
+        "ganho": out.loc[out["variacao"] > 0, "variacao"].sum(),   # soma de quem ganha cliques
+        "perda": out.loc[out["variacao"] < 0, "variacao"].sum(),   # soma de quem perde cliques (negativo)
     }
 
 
-def ranking(df, modo="descer", ajuste_ctr_pct=0.0, top=10, ignorar=(), base_home=None):
-    """Testa todos os movimentos possíveis e devolve os de maior saldo de cliques."""
-    d = preparar(df)
-    linhas = []
-    for _, r in d.iterrows():
-        if r["bloco"] in ignorar:
-            continue
-        for p in range(1, len(d) + 1):
-            if p == r["posicao"]:
-                continue
-            s = resumo(simular(d, r["bloco"], p, modo, ajuste_ctr_pct, base_home))
-            linhas.append({"bloco": r["bloco"], "de": int(r["posicao"]), "para": p,
-                           "saldo_cliques": s["saldo"], "saldo_pct": s["saldo_pct"]})
-    return pd.DataFrame(linhas).sort_values("saldo_cliques", ascending=False).head(top).reset_index(drop=True)
+def otimizar(d: pd.DataFrame, fixos=()) -> list:
+    """Melhor ordem possível, mantendo os blocos `fixos` exatamente onde estão.
+
+    Devolve a lista de nomes na nova ordem. É um problema de "quem fica em qual posição" resolvido de
+    forma exata (algoritmo húngaro), sem tentativa e erro.
+    """
+    nomes = list(d["bloco"])
+    fixos = set(fixos)
+    livres = [i for i, n in enumerate(nomes) if n not in fixos]
+    if len(livres) < 2:
+        return nomes
+
+    vis_posicao = d["visiveis"].to_numpy(float)[livres]
+    teto = _teto(d)[livres]
+    ctr = d["ctr"].to_numpy(float)[livres] / 100
+
+    # valor[a, c] = cliques do bloco livre `a` se ficar na posição livre `c`
+    valor = np.minimum(vis_posicao[None, :], teto[:, None]) * ctr[:, None]
+    valor = valor + GANHO_MINIMO * np.eye(len(livres))   # pequeno bônus por ficar onde já está
+
+    linhas, colunas = linear_sum_assignment(valor, maximize=True)
+    nova = list(nomes)
+    for a, c in zip(linhas, colunas):
+        nova[livres[c]] = nomes[livres[a]]
+    return nova
