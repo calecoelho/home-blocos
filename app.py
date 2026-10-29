@@ -57,17 +57,31 @@ def fmt(n, sinal=False):
     return t.replace(",", ".")
 
 
-def mostrar_resultado(base, ordem):
-    """Mostra quanto a nova ordem ganha e perde em cliques, bloco a bloco."""
+def mostrar_resultado(base, ordem, compacto=False):
+    """Mostra quanto a nova ordem ganha e perde em cliques, bloco a bloco.
+
+    compacto=True usa duas linhas de indicadores, para caber em colunas estreitas sem cortar os números.
+    """
     out = calc.avaliar(base, ordem)
     r = calc.resumo(out)
 
-    c = st.columns(5)
-    c[0].metric("Cliques hoje", fmt(r["antes"]))
-    c[1].metric("Cliques depois", fmt(r["depois"]), f"{r['saldo_pct']:+.1f}%")
-    c[2].metric("Ganho de quem sobe", fmt(r["ganho"], True))
-    c[3].metric("Perda de quem desce", fmt(r["perda"], True))
-    c[4].metric("Saldo", fmt(r["saldo"], True))
+    ajuda = {
+        "hoje": "Cliques que os blocos recebem na ordem atual (visíveis × open rate), no período do print.",
+        "depois": "Cliques estimados com a nova ordem. O percentual compara com a ordem atual.",
+        "ganho": "Soma dos cliques ganhos pelos blocos que passam a render mais (os que sobem).",
+        "perda": "Soma dos cliques perdidos pelos blocos que passam a render menos (os que descem).",
+        "saldo": "Ganho + perda: a diferença total entre a ordem nova e a atual.",
+    }
+    if compacto:
+        linha1, linha2 = st.columns(3), st.columns(2)
+        c = [linha1[0], linha1[1], linha2[0], linha2[1], linha1[2]]
+    else:
+        c = st.columns(5)
+    c[0].metric("Cliques hoje", fmt(r["antes"]), help=ajuda["hoje"])
+    c[1].metric("Cliques depois", fmt(r["depois"]), f"{r['saldo_pct']:+.1f}%", help=ajuda["depois"])
+    c[2].metric("Ganho de quem sobe", fmt(r["ganho"], True), help=ajuda["ganho"])
+    c[3].metric("Perda de quem desce", fmt(r["perda"], True), help=ajuda["perda"])
+    c[4].metric("Saldo", fmt(r["saldo"], True), help=ajuda["saldo"])
 
     tab = out.copy()
     tab["Mudança"] = ["—" if a == p else (f"↑ sobe {a - p}" if a > p else f"↓ desce {p - a}")
@@ -197,7 +211,7 @@ else:
             st.session_state["reset_arrasto"] += 1
             st.rerun()
     with dir_:
-        mexeu, _ = mostrar_resultado(base, ordem)
+        mexeu, _ = mostrar_resultado(base, ordem, compacto=True)
         if not mexeu:
             st.info("Arraste um bloco para uma nova posição para ver o efeito nos cliques.")
 
