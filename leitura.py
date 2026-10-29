@@ -67,6 +67,37 @@ def limpar_tabela(df: pd.DataFrame) -> pd.DataFrame:
     return d.reset_index(drop=True)
 
 
+MODELO_PADRAO = "gpt-5.4-mini"
+TOLERANCIA = 0.005   # 0,5% de diferença entre a soma das linhas e o total do cabeçalho
+
+
+def _ler(client, modelo: str, b64: str, mime: str, esforco: str) -> dict:
+    """Uma leitura da imagem. `detail: high` faz o modelo enxergar os números pequenos."""
+    args = dict(
+        model=modelo,
+        response_format={"type": "json_object"},
+        messages=[{"role": "user", "content": [
+            {"type": "text", "text": PROMPT},
+            {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}", "detail": "high"}},
+        ]}],
+    )
+    if modelo.startswith("gpt-5"):
+        args["reasoning_effort"] = esforco   # só a família gpt-5 aceita esse parâmetro
+    resp = client.chat.completions.create(**args)
+    return json.loads(resp.choices[0].message.content)
+
+
+def _erro_totais(dados: dict) -> float:
+    """Maior diferença relativa entre a soma das linhas e os totais do cabeçalho (0 = bate certinho)."""
+    blocos = pd.DataFrame(dados.get("blocos", []))
+    erros = []
+    for coluna, chave in (("visiveis", "total_visiveis"), ("elegiveis", "total_elegiveis")):
+        total = para_numero(dados.get(chave))
+        if total > 0 and coluna in blocos.columns:
+            erros.append(abs(blocos[coluna].map(para_numero).sum() - total) / total)
+    return max(erros) if erros else 0.0
+
+
 def extrair(imagens, api_key: str, modelo: str | None = None):
     """imagens: lista de (bytes, tipo_mime). Devolve (tabela, total_visiveis_do_print).
 
@@ -76,20 +107,18 @@ def extrair(imagens, api_key: str, modelo: str | None = None):
     from openai import OpenAI
 
     client = OpenAI(api_key=api_key)
-    modelo = modelo or os.getenv("OPENAI_MODEL", "gpt-4o")
+    modelo = modelo or os.getenv("OPENAI_MODEL", MODELO_PADRAO)
     partes, total_visiveis = [], 0.0
 
     for conteudo, mime in imagens:
         b64 = base64.b64encode(conteudo).decode()
-        resp = client.chat.completions.create(
-            model=modelo,
-            response_format={"type": "json_object"},
-            messages=[{"role": "user", "content": [
-                {"type": "text", "text": PROMPT},
-                {"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}},
-            ]}],
-        )
-        dados = json.loads(resp.choices[0].message.content)
+        dados = _ler(client, modelo, b64, mime, "low")
+        # Autoconferência: com uma imagem só, a soma das linhas tem que bater com os totais do cabeçalho.
+        # Se não bater, tenta de novo com mais esforço e fica com a leitura que mais se aproxima.
+        if len(imagens) == 1 and _erro_totais(dados) > TOLERANCIA and modelo.startswith("gpt-5"):
+            segunda = _ler(client, modelo, b64, mime, "high")
+            if _erro_totais(segunda) < _erro_totais(dados):
+                dados = segunda
         total_visiveis = max(total_visiveis, para_numero(dados.get("total_visiveis")))
         partes.append(pd.DataFrame(dados.get("blocos", [])))
 

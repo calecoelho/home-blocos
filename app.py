@@ -68,7 +68,7 @@ arquivos = st.file_uploader("Imagem(ns) da tela", type=["png", "jpg", "jpeg", "w
                             accept_multiple_files=True,
                             help="Se o print não coube numa imagem só, suba as partes juntas.")
 api_key = ler_config("OPENAI_API_KEY") or st.sidebar.text_input("OPENAI_API_KEY", type="password")
-modelo = st.sidebar.text_input("Modelo da OpenAI", value=ler_config("OPENAI_MODEL") or "gpt-4o")
+modelo = st.sidebar.text_input("Modelo da OpenAI", value=ler_config("OPENAI_MODEL") or leitura.MODELO_PADRAO)
 
 if arquivos and st.button("Ler a imagem"):
     if not api_key:
